@@ -1,0 +1,165 @@
+-- =====================================================================
+-- BASE DE DATOS DEL SISTEMA DE HORARIOS ESCOLARES (EPO 219)
+-- Motor: MySQL / MariaDB (XAMPP)
+-- Cómo usarlo:
+--   1) Abre phpMyAdmin (http://localhost/phpmyadmin) con XAMPP corriendo.
+--   2) Pestaña "SQL" -> pega todo este archivo -> Continuar.
+--   3) Verifica que el archivo Server/.env (o las variables de entorno)
+--      tenga: DB_HOST=127.0.0.1, DB_USER=root, DB_PASS= (vacío por defecto
+--      en XAMPP), DB_NAME=epo, DB_PORT=3306.
+-- =====================================================================
+
+CREATE DATABASE IF NOT EXISTS epo
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE epo;
+
+-- ---------------------------------------------------------------------
+-- SEMESTRES
+-- Solo uno puede estar activo (estado = 1). Docentes, materias,
+-- asignaciones y talleres se separan por `semestre_id`: al crear un
+-- registro, el sistema lo guarda en el semestre que esté activo.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS semestres (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  estado TINYINT(1) NOT NULL DEFAULT 0,
+  nombre VARCHAR(150) NOT NULL,
+  fecha_inicio DATE NULL,
+  fecha_fin DATE NULL,
+  horario LONGTEXT NULL,
+  creado_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- DOCENTES
+-- dias_preferentes: lista separada por comas (ej. "lunes,martes,viernes").
+-- Si se deja vacía (NULL), el sistema usa el número de la columna `dias`
+-- para calcular el cupo (dias * 8 módulos).
+-- color: color hexadecimal usado para pintar al docente en el horario.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS docentes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  semestre_id INT NOT NULL,
+  nombre VARCHAR(150) NOT NULL,
+  horas_asignadas INT NOT NULL DEFAULT 0,
+  dias INT NOT NULL DEFAULT 5,
+  dias_preferentes VARCHAR(60) NULL,
+  color VARCHAR(7) NOT NULL DEFAULT '#2563eb',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_docentes_semestre (semestre_id),
+  CONSTRAINT fk_docentes_semestre FOREIGN KEY (semestre_id) REFERENCES semestres(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- MATERIAS (por grado, curriculares)
+-- horario_preferente: indiferente | primeras_horas | intermedias |
+--                      ultimas_horas | ultimo_modulo
+-- Nota: el máximo de 2 horas de una misma materia por día se valida
+-- en el generador de horarios (Server/src/services/horarios.service.mjs),
+-- no requiere columna adicional.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS materias (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  semestre_id INT NOT NULL,
+  grado INT NOT NULL,
+  nombre VARCHAR(150) NOT NULL,
+  horas_semanales INT NOT NULL DEFAULT 3,
+  requiere_bloque_doble TINYINT(1) NOT NULL DEFAULT 0,
+  horario_preferente VARCHAR(30) NOT NULL DEFAULT 'indiferente',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_materias_semestre (semestre_id),
+  CONSTRAINT fk_materias_semestre FOREIGN KEY (semestre_id) REFERENCES semestres(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- TALLERES INSTITUCIONALES GENERALES
+-- No pertenecen a un grado/grupo: se insertan automáticamente en el
+-- horario de TODOS los grupos en el bloque de hora indicado.
+-- hora_inicio / hora_fin en formato 24h "HH:MM" (ej. "13:30").
+-- docente_id es opcional: si se asigna, ese docente queda "ocupado" en
+-- ese bloque y sus otras clases ese día se intentan colocar dentro de
+-- un rango de 3 horas antes/después del taller.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS talleres (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  semestre_id INT NOT NULL,
+  nombre VARCHAR(150) NOT NULL,
+  docente_id INT NULL,
+  dia VARCHAR(20) NOT NULL,
+  hora_inicio VARCHAR(5) NOT NULL,
+  hora_fin VARCHAR(5) NOT NULL,
+  activo TINYINT(1) NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_talleres_semestre (semestre_id),
+  CONSTRAINT fk_talleres_semestre FOREIGN KEY (semestre_id) REFERENCES semestres(id) ON DELETE CASCADE,
+  CONSTRAINT fk_talleres_docente FOREIGN KEY (docente_id) REFERENCES docentes(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- ASIGNACIONES (docente + materia asignados a un grado/grupo)
+-- grupo puede ser "1° I", "2° II", etc., o "TODOS" para asignaciones
+-- de tutoría/seguimiento que aplican a todo el grado.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS asignaciones (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  semestre_id INT NOT NULL,
+  docente_id INT NOT NULL,
+  materia_id INT NOT NULL,
+  grado VARCHAR(10) NOT NULL,
+  grupo VARCHAR(20) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_asignaciones_semestre (semestre_id),
+  CONSTRAINT fk_asignaciones_semestre FOREIGN KEY (semestre_id) REFERENCES semestres(id) ON DELETE CASCADE,
+  CONSTRAINT fk_asignaciones_docente FOREIGN KEY (docente_id) REFERENCES docentes(id) ON DELETE CASCADE,
+  CONSTRAINT fk_asignaciones_materia FOREIGN KEY (materia_id) REFERENCES materias(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- RECESOS POR GRADO
+-- Un receso de 30 min (configurable) por grado, en una hora distinta
+-- para cada uno. hora_inicio en formato 24h "HH:MM".
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS recesos (
+  grado INT NOT NULL PRIMARY KEY,
+  hora_inicio VARCHAR(5) NOT NULL,
+  duracion_minutos INT NOT NULL DEFAULT 30
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Valores iniciales sugeridos: cada grado descansa en una hora distinta.
+INSERT INTO recesos (grado, hora_inicio, duracion_minutos) VALUES
+  (1, '10:30', 30),
+  (2, '11:20', 30),
+  (3, '12:10', 30)
+ON DUPLICATE KEY UPDATE hora_inicio = VALUES(hora_inicio), duracion_minutos = VALUES(duracion_minutos);
+
+-- =====================================================================
+-- DATOS DE EJEMPLO (opcional) - Puedes borrar este bloque si prefieres
+-- capturar todo desde las vistas del sistema.
+-- =====================================================================
+
+-- Semestre de ejemplo (activo). Los datos de ejemplo de abajo se ligan a él.
+INSERT INTO semestres (estado, nombre, fecha_inicio, fecha_fin) VALUES
+  (1, 'Semestre de ejemplo', '2026-01-01', '2026-06-30');
+SET @sem = LAST_INSERT_ID();
+
+INSERT INTO docentes (semestre_id, nombre, horas_asignadas, dias, dias_preferentes, color) VALUES
+  (@sem, 'Ing. Gonzales Ortiz Roberto', 20, 5, 'lunes,martes,miercoles,jueves,viernes', '#2563eb'),
+  (@sem, 'Lic. Pérez García Jorge', 16, 4, 'lunes,martes,miercoles,viernes', '#16a34a'),
+  (@sem, 'Biol. Celestino Sanabria Treacy Alejandra', 12, 3, 'martes,miercoles,jueves', '#d97706'),
+  (@sem, 'Lic. Valdés López Laura Denisse', 20, 5, 'lunes,martes,miercoles,jueves,viernes', '#dc2626');
+
+INSERT INTO materias (semestre_id, grado, nombre, horas_semanales, requiere_bloque_doble, horario_preferente) VALUES
+  (@sem, 1, 'Pensamiento Matemático I', 4, 1, 'primeras_horas'),
+  (@sem, 1, 'Cultura Digital I. Ciudadanía Digital', 4, 1, 'primeras_horas'),
+  (@sem, 1, 'Lengua y Comunicación I', 3, 0, 'indiferente'),
+  (@sem, 1, 'Inglés I', 2, 0, 'intermedias');
+
+INSERT INTO talleres (semestre_id, nombre, docente_id, dia, hora_inicio, hora_fin, activo)
+SELECT @sem, 'Taller de Robótica', id, 'viernes', '08:00', '09:40', 1 FROM docentes WHERE semestre_id = @sem AND nombre LIKE 'Lic. Pérez%';
+INSERT INTO talleres (semestre_id, nombre, docente_id, dia, hora_inicio, hora_fin, activo)
+SELECT @sem, 'Laboratorio de Investigación', id, 'jueves', '08:00', '09:40', 1 FROM docentes WHERE semestre_id = @sem AND nombre LIKE 'Ing. Gonzales%';
+
+-- Nota: las asignaciones (qué docente da qué materia en qué grupo) se
+-- capturan normalmente desde la vista "Asignaciones.html" del sistema,
+-- ya que dependen de los IDs reales generados arriba.
